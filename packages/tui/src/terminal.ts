@@ -78,6 +78,41 @@ export class ProcessTerminal implements Terminal {
 	private resizeHandler?: () => void;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
+
+	/**
+	 * Whether to enable Kitty keyboard protocol flag 2 (report key
+	 * press/repeat/release events). Disabled by default and gated behind
+	 * PI_KITTY_REPORT_EVENTS=1 because flag 2 triggers an xterm.js bug
+	 * in VS Code's integrated terminal.
+	 *
+	 * ## Observable symptom
+	 *
+	 * User scrolls up in VS Code's terminal to read past output, then
+	 * Alt+Tabs to another application and back. If the user releases Alt
+	 * before Tab (a common keyboard habit), Tab remains held when focus
+	 * returns to VS Code. xterm.js, with flag 2 enabled, generates a
+	 * key release event (`CSI 9 ; 1 : 3 u`) for the held Tab. The
+	 * internal code path that generates this event also resets the
+	 * terminal viewport to the bottom, erasing the user's scrollback
+	 * position and making past output unreadable.
+	 *
+	 * ## Root cause
+	 *
+	 * This is a bug in xterm.js, not in pi. pi only asks xterm.js to
+	 * report key events (via flag 2); the viewport side-effect during
+	 * focus regain is entirely inside xterm.js's event generation path.
+	 * The bug is not limited to VS Code — any xterm.js-based terminal
+	 * (Cursor, Hyper, Tabby, etc.) is affected.
+	 *
+	 * ## Fix
+	 *
+	 * Omit flag 2. pi never calls isKeyRepeat() and isKeyRelease() only
+	 * filters events that are no longer generated. No functionality is
+	 * lost. If a future TUI component genuinely needs key release/repeat
+	 * events, the user can set PI_KITTY_REPORT_EVENTS=1 to restore flag
+	 * 2, accepting the VS Code scrollback trade-off.
+	 */
+	private _kittyReportEvents = process.env.PI_KITTY_REPORT_EVENTS === "1";
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
@@ -159,12 +194,12 @@ export class ProcessTerminal implements Terminal {
 					this._kittyProtocolActive = true;
 					setKittyProtocolActive(true);
 
-					// Enable Kitty keyboard protocol (push flags)
-					// Flag 1 = disambiguate escape codes
-					// Flag 2 = report event types (press/repeat/release)
-					// Flag 4 = report alternate keys (shifted key, base layout key)
-					// Base layout key enables shortcuts to work with non-Latin keyboard layouts
-					process.stdout.write("\x1b[>7u");
+					// Enable Kitty keyboard protocol (push flags).
+					// Flag 1: disambiguate escape codes (e.g. Tab = CSI 9 u instead of \t).
+					// Flag 4: report alternate keys for non-Latin keyboard layouts.
+					// Flag 2 (event types) is OFF by default: see _kittyReportEvents.
+					const flags = 1 + 4 + (this._kittyReportEvents ? 2 : 0);
+					process.stdout.write(`\x1b[>${flags}u`);
 					return; // Don't forward protocol response to TUI
 				}
 			}
